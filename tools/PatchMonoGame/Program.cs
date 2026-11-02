@@ -380,6 +380,67 @@ class Program
                     Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand} (Type: {inst.Operand?.GetType().Name})");
                 }
             }
+            // 0c. Patch OpenStream to allow rooted paths (Content Patcher / SVE) directly
+            var openStreamMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "OpenStream" && m.Parameters.Count == 1);
+            if (openStreamMethod != null)
+            {
+                var ilOpen = openStreamMethod.Body.GetILProcessor();
+                var fileExists = module.ImportReference(typeof(File).GetMethod("Exists", new[] { typeof(string) }));
+                var fileOpenRead = module.ImportReference(typeof(File).GetMethod("OpenRead", new[] { typeof(string) }));
+
+                // if (File.Exists(name)) return File.OpenRead(name);
+                var firstInst = openStreamMethod.Body.Instructions[0];
+                var instCheckFile = ilOpen.Create(OpCodes.Ldarg_0);
+                var instCallExists = ilOpen.Create(OpCodes.Call, fileExists);
+                var instBrFalse = ilOpen.Create(OpCodes.Brfalse, firstInst);
+                var instOpenRead = ilOpen.Create(OpCodes.Ldarg_0);
+                var instCallOpenRead = ilOpen.Create(OpCodes.Call, fileOpenRead);
+                var instRet = ilOpen.Create(OpCodes.Ret);
+
+                ilOpen.InsertBefore(firstInst, instCheckFile);
+                ilOpen.InsertAfter(instCheckFile, instCallExists);
+                ilOpen.InsertAfter(instCallExists, instBrFalse);
+                ilOpen.InsertAfter(instBrFalse, instOpenRead);
+                ilOpen.InsertAfter(instOpenRead, instCallOpenRead);
+                ilOpen.InsertAfter(instCallOpenRead, instRet);
+
+                // Neutralize Path.IsPathRooted check so it doesn't throw ArgumentException
+                for (int i = 0; i < openStreamMethod.Body.Instructions.Count; i++)
+                {
+                    var inst = openStreamMethod.Body.Instructions[i];
+                    if (inst.OpCode == OpCodes.Call && inst.Operand is MethodReference mr && mr.Name == "IsPathRooted")
+                    {
+                        inst.OpCode = OpCodes.Ldc_I4_0;
+                        inst.Operand = null;
+                        Console.WriteLine("Neutralized Path.IsPathRooted in TitleContainer.OpenStream.");
+                        break;
+                    }
+                }
+
+                Console.WriteLine("Patched TitleContainer.OpenStream to support rooted paths directly.");
+            }
+        }
+
+        // 0d. CueDefinition compatibility for XNA / Stardew Valley 1.6 AudioCueModificationManager
+        var cueDefType = module.GetType("Microsoft.Xna.Framework.Audio.CueDefinition");
+        if (cueDefType != null)
+        {
+            var nameField = cueDefType.Fields.FirstOrDefault(f => f.Name == "name");
+            if (nameField == null)
+            {
+                nameField = new FieldDefinition("name", FieldAttributes.Public, module.TypeSystem.String);
+                cueDefType.Fields.Add(nameField);
+                Console.WriteLine("Added CueDefinition.name field for XNA / Stardew Valley 1.6 AudioCueModificationManager compatibility.");
+            }
+
+            var onModifiedField = cueDefType.Fields.FirstOrDefault(f => f.Name == "OnModified");
+            if (onModifiedField == null)
+            {
+                var actionType = module.ImportReference(typeof(Action));
+                onModifiedField = new FieldDefinition("OnModified", FieldAttributes.Public, actionType);
+                cueDefType.Fields.Add(onModifiedField);
+                Console.WriteLine("Added CueDefinition.OnModified field for XNA / Stardew Valley 1.6 AudioCueModificationManager compatibility.");
+            }
         }
 
         // 1. Remove duplicate empty OggStreamSoundEffect

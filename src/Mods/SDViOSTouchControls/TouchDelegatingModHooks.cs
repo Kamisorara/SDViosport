@@ -96,20 +96,28 @@ namespace SDViOSTouchControls
                 if (pad.HasActiveInput)
                 {
                     var simState = pad.CurrentSimulatedKeyboardState;
-                    var existingKeys = keyboardState.GetPressedKeys();
-                    if (existingKeys == null || existingKeys.Length == 0)
+                    if (keyboardState.GetPressedKeyCount() == 0)
                     {
                         keyboardState = simState;
                     }
                     else
                     {
                         _mergedKeys.Clear();
-                        for (int i = 0; i < existingKeys.Length; i++)
-                            _mergedKeys.Add(existingKeys[i]);
-                        var simKeys = simState.GetPressedKeys();
-                        for (int i = 0; i < simKeys.Length; i++)
-                            _mergedKeys.Add(simKeys[i]);
-                        keyboardState = new KeyboardState(_mergedKeys.ToArray());
+                        int existingCount = keyboardState.GetPressedKeyCount();
+                        Keys[] existingArr = TouchVirtualPad.GetKeysArrayBuffer(existingCount);
+                        keyboardState.GetPressedKeys(existingArr);
+                        for (int i = 0; i < existingCount; i++)
+                            _mergedKeys.Add(existingArr[i]);
+
+                        int simCount = simState.GetPressedKeyCount();
+                        Keys[] simArr = TouchVirtualPad.GetKeysArrayBuffer(simCount);
+                        simState.GetPressedKeys(simArr);
+                        for (int i = 0; i < simCount; i++)
+                            _mergedKeys.Add(simArr[i]);
+
+                        Keys[] mergedArr = TouchVirtualPad.GetKeysArrayBuffer(_mergedKeys.Count);
+                        _mergedKeys.CopyTo(mergedArr);
+                        keyboardState = new KeyboardState(mergedArr);
                     }
                 }
 

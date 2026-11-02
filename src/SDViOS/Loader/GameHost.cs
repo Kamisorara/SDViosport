@@ -128,6 +128,10 @@ namespace SDViOS.Loader
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
         private static MethodInfo? _platformTickMethod;
+        private static Action? _cachedMakeCurrent;
+        private static UIView? _cachedMakeCurrentView;
+        private static Action? _cachedPlatformTick;
+        private static Action? _cachedThreadingRun;
         private static FieldInfo? _runnerIsActiveField;
         private static FieldInfo? _gameRunnerInstanceField;
         private static FieldInfo? _gameRunnerInstancesListField;
@@ -1768,14 +1772,34 @@ namespace SDViOS.Loader
                         }
                     }
 
-                    if (_makeCurrentMethod == null)
+                    if (_cachedMakeCurrent == null || _cachedMakeCurrentView != gameView)
                     {
-                        _makeCurrentMethod = gameView.GetType().GetMethod("MakeCurrent", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        _cachedMakeCurrentView = gameView;
+                        if (_makeCurrentMethod == null)
+                        {
+                            _makeCurrentMethod = gameView.GetType().GetMethod("MakeCurrent", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        }
+                        if (_makeCurrentMethod != null)
+                        {
+                            try
+                            {
+                                _cachedMakeCurrent = (Action)Delegate.CreateDelegate(typeof(Action), gameView, _makeCurrentMethod);
+                            }
+                            catch { }
+                        }
                     }
                     try
                     {
-                        _makeCurrentMethod?.Invoke(gameView, null);
-                        makeCurrentSuccess = true;
+                        if (_cachedMakeCurrent != null)
+                        {
+                            _cachedMakeCurrent();
+                            makeCurrentSuccess = true;
+                        }
+                        else if (_makeCurrentMethod != null)
+                        {
+                            _makeCurrentMethod.Invoke(gameView, null);
+                            makeCurrentSuccess = true;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1789,17 +1813,39 @@ namespace SDViOS.Loader
                     ReviveSMAPILogFile(SMAPICoreInstance);
                 }
 
-                int ticksBefore = GetGame1Ticks();
+                int ticksBefore = 0;
+                if (_directTickCount <= 5)
+                {
+                    ticksBefore = GetGame1Ticks();
+                }
+
                 bool platTickRan = false;
                 try
                 {
                     if (plat != null)
                     {
-                        if (_platformTickMethod == null)
+                        if (_cachedPlatformTick == null)
                         {
-                            _platformTickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (_platformTickMethod == null)
+                            {
+                                _platformTickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            }
+                            if (_platformTickMethod != null)
+                            {
+                                try
+                                {
+                                    _cachedPlatformTick = (Action)Delegate.CreateDelegate(typeof(Action), plat, _platformTickMethod);
+                                }
+                                catch { }
+                            }
                         }
-                        if (_platformTickMethod != null)
+
+                        if (_cachedPlatformTick != null)
+                        {
+                            _cachedPlatformTick();
+                            platTickRan = true;
+                        }
+                        else if (_platformTickMethod != null)
                         {
                             _platformTickMethod.Invoke(plat, null);
                             platTickRan = true;
@@ -1811,30 +1857,60 @@ namespace SDViOS.Loader
                     if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] plat.Tick error: {ex.InnerException ?? ex}");
                 }
 
-                int ticksAfter = GetGame1Ticks();
                 bool runnerTickRan = false;
-                if (ticksAfter == ticksBefore && runner.GraphicsDevice != null)
+                if (_directTickCount <= 5)
+                {
+                    int ticksAfter = GetGame1Ticks();
+                    if (ticksAfter == ticksBefore && runner.GraphicsDevice != null)
+                    {
+                        try
+                        {
+                            runner.Tick();
+                            runnerTickRan = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] runner.Tick error: {ex.InnerException ?? ex}");
+                        }
+                    }
+                }
+                else if (!platTickRan && runner.GraphicsDevice != null)
                 {
                     try
                     {
                         runner.Tick();
                         runnerTickRan = true;
                     }
-                    catch (Exception ex)
-                    {
-                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] runner.Tick error: {ex.InnerException ?? ex}");
-                    }
+                    catch { }
                 }
 
                 // 5. Threading.Run
-                if (_threadingRunMethod == null)
+                if (_cachedThreadingRun == null)
                 {
-                    var threadingType = typeof(Game).Assembly.GetType("Microsoft.Xna.Framework.Threading");
-                    _threadingRunMethod = threadingType?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                    if (_threadingRunMethod == null)
+                    {
+                        var threadingType = typeof(Game).Assembly.GetType("Microsoft.Xna.Framework.Threading");
+                        _threadingRunMethod = threadingType?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                    }
+                    if (_threadingRunMethod != null)
+                    {
+                        try
+                        {
+                            _cachedThreadingRun = (Action)Delegate.CreateDelegate(typeof(Action), _threadingRunMethod);
+                        }
+                        catch { }
+                    }
                 }
                 try
                 {
-                    _threadingRunMethod?.Invoke(null, null);
+                    if (_cachedThreadingRun != null)
+                    {
+                        _cachedThreadingRun();
+                    }
+                    else
+                    {
+                        _threadingRunMethod?.Invoke(null, null);
+                    }
                 }
                 catch { }
 

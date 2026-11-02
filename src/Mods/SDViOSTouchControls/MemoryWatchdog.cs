@@ -165,7 +165,7 @@ namespace SDViOSTouchControls
                         {
                             shouldCollect = true;
                             gcInterval = 4000;
-                            compactLoh = true;
+                            compactLoh = false; // Fast Gen2 GC without expensive LOH compaction during active gameplay (LOH compaction quarantined to fades/warps/saving)
                         }
                         else if (avail >= 0 && avail < 150 * MB && managedGrowth >= 48 * MB && (now - _lastGc).TotalMilliseconds >= 10000)
                         {

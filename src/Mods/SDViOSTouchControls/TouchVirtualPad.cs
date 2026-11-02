@@ -108,6 +108,22 @@ namespace SDViOSTouchControls
         private readonly object[] _setKeysArgs = new object[1];
         private static readonly KeyboardState _emptyKeyboardState = new KeyboardState();
 
+        private static readonly Keys[][] _cachedKeysArrays = new Keys[32][];
+        static TouchVirtualPad()
+        {
+            for (int i = 0; i < _cachedKeysArrays.Length; i++)
+            {
+                _cachedKeysArrays[i] = new Keys[i];
+            }
+        }
+
+        public static Keys[] GetKeysArrayBuffer(int count)
+        {
+            if (count <= 0) return Array.Empty<Keys>();
+            if (count < _cachedKeysArrays.Length) return _cachedKeysArrays[count];
+            return new Keys[count];
+        }
+
         private static void AddOptionKeys(HashSet<Keys> set, InputButton[]? buttons)
         {
             if (buttons == null) return;
@@ -190,7 +206,7 @@ namespace SDViOSTouchControls
                 if (_simKeysSet.Count == 0)
                     return _emptyKeyboardState;
 
-                var arr = new Keys[_simKeysSet.Count];
+                var arr = GetKeysArrayBuffer(_simKeysSet.Count);
                 _simKeysSet.CopyTo(arr);
                 return new KeyboardState(arr);
             }
@@ -426,6 +442,7 @@ namespace SDViOSTouchControls
         private static PropertyInfo? _optionsProp = null;
         private static FieldInfo? _gamepadControlsField = null;
         private static MethodInfo? _setKeysMethod = null;
+        private static Action<List<Keys>>? _cachedSetKeys = null;
 
         public static Action<string>? LogAction { get; set; }
 
@@ -2079,12 +2096,31 @@ namespace SDViOSTouchControls
 
                 try
                 {
-                    if (_setKeysMethod == null)
+                    if (_cachedSetKeys == null)
                     {
-                        _setKeysMethod = typeof(Microsoft.Xna.Framework.Input.Keyboard).GetMethod("SetKeys", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                        if (_setKeysMethod == null)
+                        {
+                            _setKeysMethod = typeof(Microsoft.Xna.Framework.Input.Keyboard).GetMethod("SetKeys", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                        }
+                        if (_setKeysMethod != null)
+                        {
+                            try
+                            {
+                                _cachedSetKeys = (Action<List<Keys>>)Delegate.CreateDelegate(typeof(Action<List<Keys>>), _setKeysMethod);
+                            }
+                            catch { }
+                        }
                     }
-                    _setKeysArgs[0] = _activeKeysList;
-                    _setKeysMethod?.Invoke(null, _setKeysArgs);
+
+                    if (_cachedSetKeys != null)
+                    {
+                        _cachedSetKeys(_activeKeysList);
+                    }
+                    else if (_setKeysMethod != null)
+                    {
+                        _setKeysArgs[0] = _activeKeysList;
+                        _setKeysMethod.Invoke(null, _setKeysArgs);
+                    }
                 }
                 catch { }
 
@@ -2093,9 +2129,17 @@ namespace SDViOSTouchControls
                 {
                     if (_currentKeyboardStateField != null)
                     {
-                        var kbState = _activeKeysList.Count == 0
-                            ? _emptyKeyboardState
-                            : new KeyboardState(_activeKeysList.ToArray());
+                        KeyboardState kbState;
+                        if (_activeKeysList.Count == 0)
+                        {
+                            kbState = _emptyKeyboardState;
+                        }
+                        else
+                        {
+                            var arr = GetKeysArrayBuffer(_activeKeysList.Count);
+                            _activeKeysList.CopyTo(arr);
+                            kbState = new KeyboardState(arr);
+                        }
                         _currentKeyboardStateField.SetValue(_inputInstance, kbState);
                     }
                     if (_currentGamepadStateField != null)
