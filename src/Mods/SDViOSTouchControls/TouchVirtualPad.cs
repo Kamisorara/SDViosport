@@ -108,6 +108,27 @@ namespace SDViOSTouchControls
         private readonly object[] _setKeysArgs = new object[1];
         private static readonly KeyboardState _emptyKeyboardState = new KeyboardState();
 
+        // Inventory Action Bar & Modifier States
+        public bool IsSingleItemMode { get; private set; } = false;
+        public bool IsHalfStackMode { get; private set; } = false;
+        public bool IsQuickTransferMode { get; private set; } = false;
+
+        private Rectangle _btnInventoryOneRect = Rectangle.Empty;
+        private Rectangle _btnInventoryHalfRect = Rectangle.Empty;
+        private Rectangle _btnInventoryXferRect = Rectangle.Empty;
+
+        private int _simulatedRightClickFrames = 0;
+        private bool _lastMenuOpenState = false;
+
+        // Hold-to-Dispense state (Amendment 3)
+        private Vector2 _menuTouchStartPos = Vector2.Zero;
+        private double _menuTouchHoldTimer = 0.0;
+        private double _dispenseIntervalTimer = 0.0;
+        private bool _menuTouchHasDispensed = false;
+        private bool _menuTwoFingerTapPending = false;
+        private DateTime _lastBaitTapTime = DateTime.MinValue;
+        private Point _lastBaitTapPos = new Point(-1000, -1000);
+
         private static readonly Keys[][] _cachedKeysArrays = new Keys[32][];
         static TouchVirtualPad()
         {
@@ -191,6 +212,11 @@ namespace SDViOSTouchControls
                 {
                     _simKeysSet.Add(Keys.Escape);
                     AddOptionKeys(_simKeysSet, opt?.cancelButton);
+                }
+
+                if (Game1.activeClickableMenu != null && (IsQuickTransferMode || IsHalfStackMode))
+                {
+                    _simKeysSet.Add(Keys.LeftShift);
                 }
 
                 for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
@@ -614,6 +640,21 @@ namespace SDViOSTouchControls
                 _hotkeySlotRects[i] = new Rectangle(sx, sy, slotW, slotH);
             }
 
+            // Inventory Action Bar buttons (docked at Top-Left Header row 2, y = 56f)
+            float invY = topY + topBtnH + 6f;
+            float invBtnH = 32f;
+            float invBtnW = 54f;
+            float invX = 40f;
+
+            _btnInventoryOneRect = new Rectangle((int)invX, (int)invY, (int)invBtnW, (int)invBtnH);
+            invX += (invBtnW + 8f);
+
+            _btnInventoryHalfRect = new Rectangle((int)invX, (int)invY, (int)invBtnW, (int)invBtnH);
+            invX += (invBtnW + 8f);
+
+            float xferW = 74f;
+            _btnInventoryXferRect = new Rectangle((int)invX, (int)invY, (int)xferW, (int)invBtnH);
+
             int saveRowY = drawerY + drawerPad + 2 * (slotH + slotGapY) + 4;
             int saveRowH = 34;
             int halfW = (gridW - 8) / 2;
@@ -757,6 +798,47 @@ namespace SDViOSTouchControls
                 _trackpadRightClickFrames--;
             }
 
+            if (_simulatedRightClickFrames > 0)
+            {
+                SimulatedMouseRightDown = true;
+                _simulatedRightClickFrames--;
+            }
+
+            // Reset modifier modes when menu closes
+            bool isMenuOpen = Game1.activeClickableMenu != null;
+            if (!isMenuOpen && _lastMenuOpenState)
+            {
+                IsSingleItemMode = false;
+                IsHalfStackMode = false;
+                IsQuickTransferMode = false;
+                _menuTouchHoldTimer = 0.0;
+                _dispenseIntervalTimer = 0.0;
+                _menuTouchHasDispensed = false;
+                _menuTwoFingerTapPending = false;
+            }
+            _lastMenuOpenState = isMenuOpen;
+
+            // Hold-to-Dispense accumulation using GameTime (Amendment 3)
+            if (isMenuOpen && Settings.EnableHoldToDispense && _pointClickTouchId != -1 && _menuTouchHoldTimer >= 0.0)
+            {
+                _menuTouchHoldTimer += gameTime.ElapsedGameTime.TotalMilliseconds;
+                if (_menuTouchHoldTimer >= 250.0)
+                {
+                    _dispenseIntervalTimer += gameTime.ElapsedGameTime.TotalMilliseconds;
+                    if (_dispenseIntervalTimer >= 100.0)
+                    {
+                        _dispenseIntervalTimer -= 100.0;
+                        _menuTouchHasDispensed = true;
+                        SimulatedMousePosition = new Point((int)Math.Round(_menuTouchStartPos.X), (int)Math.Round(_menuTouchStartPos.Y));
+                        SimulatedMouseRightDown = true;
+                        _simulatedRightClickFrames = 2;
+                        SimulatedMouseLeftDown = false;
+                        _pointClickHoldFrames = 0;
+                        Game1.lastCursorMotionWasMouse = true;
+                    }
+                }
+            }
+
             // 0. Process Key Picker Modal Interaction
             if (IsKeyPickerOpen)
             {
@@ -822,6 +904,18 @@ namespace SDViOSTouchControls
             bool trackpadPrimaryPresent = false;
             bool trackpadSecondPresent = false;
 
+            if (Game1.activeClickableMenu != null && touches.Count >= 2)
+            {
+                foreach (var t in touches)
+                {
+                    if (t.State == TouchLocationState.Pressed)
+                    {
+                        _menuTwoFingerTapPending = true;
+                        break;
+                    }
+                }
+            }
+
             foreach (var touch in touches)
             {
                 if (touch.Id == _trackpadPrimaryTouchId) trackpadPrimaryPresent = true;
@@ -829,6 +923,40 @@ namespace SDViOSTouchControls
 
                 // Map raw touch coordinate to viewport coordinate
                 Point pt = MapTouchToViewport(touch.Position);
+
+                // Inventory Action Bar check (when menu is active, Amendment 2)
+                if (Game1.activeClickableMenu != null && Settings.EnableInventoryToolbar)
+                {
+                    if (_btnInventoryOneRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed)
+                        {
+                            IsSingleItemMode = !IsSingleItemMode;
+                            if (IsSingleItemMode) IsHalfStackMode = false;
+                            try { Game1.playSound("drumkit6"); } catch { }
+                        }
+                        continue;
+                    }
+                    if (_btnInventoryHalfRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed)
+                        {
+                            IsHalfStackMode = !IsHalfStackMode;
+                            if (IsHalfStackMode) IsSingleItemMode = false;
+                            try { Game1.playSound("drumkit6"); } catch { }
+                        }
+                        continue;
+                    }
+                    if (_btnInventoryXferRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed)
+                        {
+                            IsQuickTransferMode = !IsQuickTransferMode;
+                            try { Game1.playSound("drumkit6"); } catch { }
+                        }
+                        continue;
+                    }
+                }
 
                 // Priority 1: If this touch is already claimed by the joystick, continue tracking it even if dragged across screen
                 if (_stickTouchId != -1 && touch.Id == _stickTouchId)
@@ -1554,8 +1682,50 @@ namespace SDViOSTouchControls
                 if (touch.State == TouchLocationState.Pressed)
                 {
                     _pointClickTouchId = touch.Id;
-                    SimulatedMouseLeftDown = true;
-                    _pointClickHoldFrames = 2; // Hold for 2 ticks to guarantee clean rising & falling edge
+                    _menuTouchStartPos = touch.Position;
+                    _menuTouchHoldTimer = 0.0;
+                    _dispenseIntervalTimer = 0.0;
+                    _menuTouchHasDispensed = false;
+
+                    // Check explicit double-tap bait attachment on fishing rod (Amendment 4)
+                    bool isBaitDoubleTap = false;
+                    if (inMenu)
+                    {
+                        try
+                        {
+                            var held = Game1.player?.CursorSlotItem as StardewValley.Object;
+                            if (held != null && (held.Category == -21 || held.Category == -22))
+                            {
+                                var now = DateTime.UtcNow;
+                                if ((now - _lastBaitTapTime).TotalMilliseconds < 400.0 &&
+                                    Vector2.Distance(touch.Position, new Vector2(_lastBaitTapPos.X, _lastBaitTapPos.Y)) < 40f)
+                                {
+                                    isBaitDoubleTap = true;
+                                    _lastBaitTapTime = DateTime.MinValue;
+                                }
+                                else
+                                {
+                                    _lastBaitTapTime = now;
+                                    _lastBaitTapPos = new Point((int)Math.Round(touch.Position.X), (int)Math.Round(touch.Position.Y));
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (inMenu && (IsSingleItemMode || IsHalfStackMode || _menuTwoFingerTapPending || isBaitDoubleTap))
+                    {
+                        SimulatedMouseRightDown = true;
+                        _simulatedRightClickFrames = 2;
+                        SimulatedMouseLeftDown = false;
+                        _pointClickHoldFrames = 0;
+                        _menuTwoFingerTapPending = false;
+                    }
+                    else
+                    {
+                        SimulatedMouseLeftDown = true;
+                        _pointClickHoldFrames = 2; // Hold for 2 ticks to guarantee clean rising & falling edge
+                    }
                     Game1.lastCursorMotionWasMouse = true;
                 }
                 else if (touch.State == TouchLocationState.Moved)
@@ -1563,8 +1733,16 @@ namespace SDViOSTouchControls
                     if (_pointClickTouchId == touch.Id || _pointClickTouchId == -1)
                     {
                         _pointClickTouchId = touch.Id;
-                        SimulatedMouseLeftDown = true;
-                        _pointClickHoldFrames = 2;
+                        if (Vector2.Distance(touch.Position, _menuTouchStartPos) > 25f)
+                        {
+                            // Dragged away: cancel hold-to-dispense
+                            _menuTouchHoldTimer = -1000.0;
+                        }
+                        if (!inMenu || (!IsSingleItemMode && !IsHalfStackMode && !_menuTouchHasDispensed))
+                        {
+                            SimulatedMouseLeftDown = true;
+                            _pointClickHoldFrames = 2;
+                        }
                         Game1.lastCursorMotionWasMouse = true;
                     }
                 }
@@ -1573,13 +1751,30 @@ namespace SDViOSTouchControls
                     if (_pointClickTouchId == -1)
                     {
                         // Ultra-fast micro-tap delivered directly as Released!
-                        SimulatedMouseLeftDown = true;
-                        _pointClickHoldFrames = 2;
+                        if (inMenu && (IsSingleItemMode || IsHalfStackMode || _menuTwoFingerTapPending))
+                        {
+                            SimulatedMouseRightDown = true;
+                            _simulatedRightClickFrames = 2;
+                            SimulatedMouseLeftDown = false;
+                            _pointClickHoldFrames = 0;
+                            _menuTwoFingerTapPending = false;
+                        }
+                        else
+                        {
+                            SimulatedMouseLeftDown = true;
+                            _pointClickHoldFrames = 2;
+                        }
                         Game1.lastCursorMotionWasMouse = true;
                     }
                     else if (_pointClickTouchId == touch.Id)
                     {
                         _pointClickTouchId = -1;
+                        if (_menuTouchHasDispensed)
+                        {
+                            // Suppress release Left-Click so remaining stack is NOT dropped
+                            SimulatedMouseLeftDown = false;
+                            _pointClickHoldFrames = 0;
+                        }
                     }
                 }
                 return;
@@ -2079,6 +2274,14 @@ namespace SDViOSTouchControls
                 if (ButtonY) _activeKeysList.Add(Keys.E);
                 if (ButtonB || ButtonMenu) _activeKeysList.Add(Keys.Escape);
 
+                if (Game1.activeClickableMenu != null && (IsQuickTransferMode || IsHalfStackMode))
+                {
+                    if (!_activeKeysList.Contains(Keys.LeftShift))
+                    {
+                        _activeKeysList.Add(Keys.LeftShift);
+                    }
+                }
+
                 for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
                 {
                     if (_hotkeyTouchActive[i] || _hotkeyPulseFrames[i] > 0)
@@ -2399,6 +2602,22 @@ namespace SDViOSTouchControls
             if (IsHotkeyDrawerOpen && Settings.ShowHotkeyDrawerBtn)
             {
                 DrawHotkeyDrawer(spriteBatch, alpha);
+            }
+
+            // Draw Inventory Action Bar (when menu is active, Amendment 2)
+            if (Game1.activeClickableMenu != null && Settings.EnableInventoryToolbar)
+            {
+                Color x1Bg = IsSingleItemMode ? new Color(218, 165, 32) : new Color(38, 48, 64) * Math.Max(0.7f, alpha);
+                DrawButton(spriteBatch, _btnInventoryOneRect, "x1", x1Bg, Color.White, 2);
+                if (IsSingleItemMode) DrawRectBorder(spriteBatch, _btnInventoryOneRect, 2, Color.Gold);
+
+                Color halfBg = IsHalfStackMode ? new Color(30, 144, 255) : new Color(38, 48, 64) * Math.Max(0.7f, alpha);
+                DrawButton(spriteBatch, _btnInventoryHalfRect, "1/2", halfBg, Color.White, 2);
+                if (IsHalfStackMode) DrawRectBorder(spriteBatch, _btnInventoryHalfRect, 2, Color.DeepSkyBlue);
+
+                Color xferBg = IsQuickTransferMode ? new Color(255, 140, 0) : new Color(38, 48, 64) * Math.Max(0.7f, alpha);
+                DrawButton(spriteBatch, _btnInventoryXferRect, "XFER", xferBg, Color.White, 2);
+                if (IsQuickTransferMode) DrawRectBorder(spriteBatch, _btnInventoryXferRect, 2, Color.Orange);
             }
 
             if (IsVisible)

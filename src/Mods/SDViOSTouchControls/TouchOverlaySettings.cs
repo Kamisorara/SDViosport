@@ -25,6 +25,8 @@ namespace SDViOSTouchControls
         public bool AutoCloseHotkeyDrawer { get; set; } = false;
         public bool SimulateMouseOnTap { get; set; } = true;
         public bool EnableDeferredMapLoading { get; set; } = true;
+        public bool EnableInventoryToolbar { get; set; } = true;
+        public bool EnableHoldToDispense { get; set; } = true;
 
         public const int HotkeySlotCount = 8;
 
@@ -166,6 +168,10 @@ namespace SDViOSTouchControls
                         SimulateMouseOnTap = smt;
                     else if (key.Equals("EnableDeferredMapLoading", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool edml))
                         EnableDeferredMapLoading = edml;
+                    else if (key.Equals("EnableInventoryToolbar", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool eit))
+                        EnableInventoryToolbar = eit;
+                    else if (key.Equals("EnableHoldToDispense", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool ehtd))
+                        EnableHoldToDispense = ehtd;
                     else if (key.Equals("TargetUIScale", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float tuis))
                         TargetUIScale = Math.Clamp(tuis, 0.75f, 2.0f);
                     else if (key.Equals("TargetZoomLevel", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float tzl))
@@ -240,6 +246,8 @@ namespace SDViOSTouchControls
                 sb.Append($"  \"AutoCloseHotkeyDrawer\": {(AutoCloseHotkeyDrawer ? "true" : "false")},\n");
                 sb.Append($"  \"SimulateMouseOnTap\": {(SimulateMouseOnTap ? "true" : "false")},\n");
                 sb.Append($"  \"EnableDeferredMapLoading\": {(EnableDeferredMapLoading ? "true" : "false")},\n");
+                sb.Append($"  \"EnableInventoryToolbar\": {(EnableInventoryToolbar ? "true" : "false")},\n");
+                sb.Append($"  \"EnableHoldToDispense\": {(EnableHoldToDispense ? "true" : "false")},\n");
                 sb.Append($"  \"TargetUIScale\": {TargetUIScale.ToString("0.00", CultureInfo.InvariantCulture)},\n");
                 sb.Append($"  \"TargetZoomLevel\": {TargetZoomLevel.ToString("0.00", CultureInfo.InvariantCulture)},\n");
                 sb.Append($"  \"MouseControlMode\": \"{MouseControlMode}\",\n");
