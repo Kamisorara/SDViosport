@@ -24,6 +24,7 @@ namespace SDViOSTouchControls
         public static LazyIosDisplayDevice? Instance { get; private set; }
         private readonly HashSet<TileSheet> _failedTileSheets = new();
         private static System.Reflection.FieldInfo? _loadedAssetsField;
+        private static System.Reflection.FieldInfo? _disposableAssetsField;
 
         public LazyIosDisplayDevice(ContentManager contentManager, GraphicsDevice graphicsDevice)
             : base(contentManager, graphicsDevice)
@@ -80,13 +81,39 @@ namespace SDViOSTouchControls
                     return;
                 }
 
+                // 1. Collect normalized ImageSource strings still needed by keepMap so shared tilesheets are preserved
+                HashSet<string>? keepSources = null;
+                if (keepMap.TileSheets != null)
+                {
+                    keepSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var ts in keepMap.TileSheets)
+                    {
+                        if (ts != null && !string.IsNullOrEmpty(ts.ImageSource))
+                        {
+                            keepSources.Add(ts.ImageSource.Replace('\\', '/'));
+                        }
+                    }
+                }
+
                 List<TileSheet>? toRemove = null;
+                HashSet<string>? sourcesToEvict = null;
                 foreach (var kvp in m_tileSheetTextures)
                 {
                     if (kvp.Key == null || !ReferenceEquals(kvp.Key.Map, keepMap))
                     {
                         toRemove ??= new List<TileSheet>();
                         toRemove.Add(kvp.Key!);
+
+                        string? src = kvp.Key?.ImageSource;
+                        if (!string.IsNullOrEmpty(src))
+                        {
+                            string norm = src.Replace('\\', '/');
+                            if ((keepSources == null || !keepSources.Contains(norm)) && !ModEntry.IsCoreAsset(norm))
+                            {
+                                sourcesToEvict ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                sourcesToEvict.Add(norm);
+                            }
+                        }
                     }
                 }
 
@@ -97,20 +124,92 @@ namespace SDViOSTouchControls
                         m_tileSheetTextures.Remove(toRemove[i]);
                     }
                 }
+
+                // 2. Evict unshared outgoing location tilesheet textures from ContentManager before pre-warming destination
+                if (sourcesToEvict != null && sourcesToEvict.Count > 0 && m_contentManager != null)
+                {
+                    _loadedAssetsField ??= typeof(ContentManager).GetField("loadedAssets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                    _disposableAssetsField ??= typeof(ContentManager).GetField("disposableAssets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                    if (_loadedAssetsField?.GetValue(m_contentManager) is System.Collections.IDictionary dict)
+                    {
+                        var disposables = _disposableAssetsField?.GetValue(m_contentManager) as System.Collections.IList;
+                        List<object>? keysToRemove = null;
+                        lock (m_contentManager)
+                        {
+                            foreach (var k in dict.Keys)
+                            {
+                                if (k is string s && sourcesToEvict.Contains(s.Replace('\\', '/')))
+                                {
+                                    keysToRemove ??= new List<object>();
+                                    keysToRemove.Add(k);
+                                }
+                            }
+                            if (keysToRemove != null)
+                            {
+                                for (int i = 0; i < keysToRemove.Count; i++)
+                                {
+                                    var key = keysToRemove[i];
+                                    var val = dict[key];
+                                    dict.Remove(key);
+                                    if (val is IDisposable disp)
+                                    {
+                                        disposables?.Remove(disp);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             catch { }
         }
 
-        public override void DrawTile(Tile? tile, Location location, float layerDepth)
+        /// <summary>
+        /// Pre-warms destination map tilesheets during black-screen warp transitions after outgoing textures are pruned.
+        /// Aborts immediately if available OS memory is below 300 MB (or drops below 250 MB mid-warm), falling back to lazy DrawTile loading.
+        /// </summary>
+        public void PrewarmMapTileSheets(Map? targetMap)
         {
-            if (tile == null || tile.TileSheet == null)
-                return;
+            try
+            {
+                if (!TouchOverlaySettings.Instance.EnableWarpTilesheetPrewarm)
+                    return;
+                if (targetMap?.TileSheets == null || targetMap.TileSheets.Count == 0)
+                    return;
 
-            var ts = tile.TileSheet;
+                // Low-memory abort guard: require at least 300 MB free OS headroom to start pre-warming
+                long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                if (availMb < 300)
+                    return;
+
+                foreach (var ts in targetMap.TileSheets)
+                {
+                    if (ts == null || string.IsNullOrEmpty(ts.ImageSource))
+                        continue;
+
+                    // Skip editor-only Paths sheet (never drawn in gameplay)
+                    if (string.Equals(ts.Id, "Paths", StringComparison.OrdinalIgnoreCase) ||
+                        ts.ImageSource.EndsWith("paths", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // Per-sheet low-memory abort guard (250 MB floor)
+                    if (MemoryWatchdog.Available() / (1024 * 1024) < 250)
+                        break;
+
+                    TryGetOrLoadTexture(ts);
+                }
+            }
+            catch { }
+        }
+
+        private Texture2D? TryGetOrLoadTexture(TileSheet ts)
+        {
             if (!m_tileSheetTextures.TryGetValue(ts, out Texture2D? value) || value == null || value.IsDisposed)
             {
                 if (_failedTileSheets.Contains(ts))
-                    return;
+                    return null;
 
                 try
                 {
@@ -144,15 +243,25 @@ namespace SDViOSTouchControls
                     if (value == null || value.IsDisposed)
                     {
                         _failedTileSheets.Add(ts);
-                        return;
+                        return null;
                     }
                 }
                 catch
                 {
                     _failedTileSheets.Add(ts);
-                    return;
+                    return null;
                 }
             }
+            return value;
+        }
+
+        public override void DrawTile(Tile? tile, Location location, float layerDepth)
+        {
+            if (tile == null || tile.TileSheet == null)
+                return;
+
+            var ts = tile.TileSheet;
+            Texture2D? value = TryGetOrLoadTexture(ts);
 
             if (value != null && !value.IsDisposed)
             {

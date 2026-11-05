@@ -19,6 +19,7 @@
     <UseInterpreter>true</UseInterpreter>
     <MtouchLink>None</MtouchLink>
     <PublishTrimmed>true</PublishTrimmed>
+    <MtouchExtraArgs>$(MtouchExtraArgs) --setenv=MONO_GC_PARAMS=nursery-size=16m</MtouchExtraArgs>
 
     <ApplicationTitle>Stardew Valley</ApplicationTitle>
     <ApplicationId>com.deadakj.sdvios</ApplicationId>

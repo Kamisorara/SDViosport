@@ -142,6 +142,99 @@ namespace SDViOS.Loader
         private static bool _touchOverlayAttached = false;
         private static bool _viewHierarchyAudited = false;
 
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativeCAFrameRateRange
+        {
+            public float Minimum;
+            public float Maximum;
+            public float Preferred;
+        }
+
+        [System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib", EntryPoint = "sel_registerName")]
+        private static extern IntPtr sel_registerName(string name);
+
+        [System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.I1)]
+        private static extern bool objc_msgSend_bool_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1);
+
+        [System.Runtime.InteropServices.DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern void objc_msgSend_CAFrameRateRange(IntPtr receiver, IntPtr selector, NativeCAFrameRateRange range);
+
+        private static IntPtr _selSetPreferredFrameRateRange;
+        private static IntPtr _selRespondsToSelector;
+        private static int _currentTargetFps = 0;
+
+        public static void SetDisplayLinkFrameRate(float minHz, float maxHz, float preferredHz)
+        {
+            try
+            {
+                if (_engineDisplayLink == null) return;
+                int targetInt = (int)preferredHz;
+                if (_currentTargetFps == targetInt) return;
+                _currentTargetFps = targetInt;
+
+                try { _engineDisplayLink.PreferredFramesPerSecond = targetInt; } catch { }
+
+                IntPtr dlHandle = (IntPtr)_engineDisplayLink.Handle;
+                if (dlHandle != IntPtr.Zero)
+                {
+                    if (_selSetPreferredFrameRateRange == IntPtr.Zero)
+                        _selSetPreferredFrameRateRange = sel_registerName("setPreferredFrameRateRange:");
+                    if (_selRespondsToSelector == IntPtr.Zero)
+                        _selRespondsToSelector = sel_registerName("respondsToSelector:");
+
+                    if (objc_msgSend_bool_IntPtr(dlHandle, _selRespondsToSelector, _selSetPreferredFrameRateRange))
+                    {
+                        objc_msgSend_CAFrameRateRange(dlHandle, _selSetPreferredFrameRateRange, new NativeCAFrameRateRange
+                        {
+                            Minimum = minHz,
+                            Maximum = maxHz,
+                            Preferred = preferredHz
+                        });
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void RelocateDisabledMods()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ModsDir) || !Directory.Exists(ModsDir)) return;
+                string disabledRoot = Path.Combine(DocumentsDir, "DisabledMods");
+                int moved = 0;
+                foreach (string dir in Directory.GetDirectories(ModsDir))
+                {
+                    string folderName = Path.GetFileName(dir);
+                    if (folderName.StartsWith(".disabled_", StringComparison.OrdinalIgnoreCase) ||
+                        folderName.StartsWith(".disabled-", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(disabledRoot);
+                            string dest = Path.Combine(disabledRoot, folderName);
+                            if (Directory.Exists(dest))
+                            {
+                                Directory.Delete(dest, recursive: true);
+                            }
+                            Directory.Move(dir, dest);
+                            moved++;
+                        }
+                        catch { }
+                    }
+                }
+                if (moved > 0)
+                {
+                    EngineLogger.Log($"[GameHost] Relocated {moved} disabled mod folder(s) from Mods/ to DisabledMods/.");
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Note relocating disabled mods: {ex.Message}");
+            }
+        }
+
         public static void InitializeFileSystem()
         {
             DocumentsDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
@@ -203,6 +296,7 @@ namespace SDViOS.Loader
 
             // Always ensure built-in SDViOSTouchControls mod is deployed
             EnsureDefaultModsDeployed();
+            RelocateDisabledMods();
 
             // Clean up any stale BCL DLL that may have been placed into Documents in older builds
             string staleCoreLib = Path.Combine(GameRootDir, "System.Private.CoreLib.dll");
@@ -1440,7 +1534,9 @@ namespace SDViOS.Loader
                     {
                         ExecuteDirectGameTick(runner, plat, _activeGameView);
                     });
-                    try { _engineDisplayLink.PreferredFramesPerSecond = 60; } catch { }
+                    try { runner.IsFixedTimeStep = true; runner.TargetElapsedTime = TimeSpan.FromTicks(166667); } catch { }
+                    _currentTargetFps = 0;
+                    SetDisplayLinkFrameRate(60f, 60f, 60f);
                     _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
                     _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Default);
                     _engineDisplayLink.Paused = false;

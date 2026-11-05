@@ -43,6 +43,11 @@
     <true/>
     <key>CADisableMinimumFrameDurationOnPhone</key>
     <true/>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>MONO_GC_PARAMS</key>
+        <string>nursery-size=16m</string>
+    </dict>
     <key>GCSupportedGameControllers</key>
     <array>
         <dict>

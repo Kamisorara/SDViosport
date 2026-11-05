@@ -27,6 +27,11 @@ namespace SDViOSTouchControls
         public bool EnableDeferredMapLoading { get; set; } = true;
         public bool EnableInventoryToolbar { get; set; } = true;
         public bool EnableHoldToDispense { get; set; } = true;
+        public bool EnableLockedFramePacing { get; set; } = true;
+        public bool EnableMenuFrameThrottling { get; set; } = true;
+        public bool EnableWarpTilesheetPrewarm { get; set; } = true;
+        public bool EnableBufferedLogging { get; set; } = true;
+        public bool EnableDisabledModsRelocation { get; set; } = true;
 
         public const int HotkeySlotCount = 8;
 
@@ -172,6 +177,16 @@ namespace SDViOSTouchControls
                         EnableInventoryToolbar = eit;
                     else if (key.Equals("EnableHoldToDispense", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool ehtd))
                         EnableHoldToDispense = ehtd;
+                    else if (key.Equals("EnableLockedFramePacing", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool elfp))
+                        EnableLockedFramePacing = elfp;
+                    else if (key.Equals("EnableMenuFrameThrottling", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool emft))
+                        EnableMenuFrameThrottling = emft;
+                    else if (key.Equals("EnableWarpTilesheetPrewarm", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool ewtp))
+                        EnableWarpTilesheetPrewarm = ewtp;
+                    else if (key.Equals("EnableBufferedLogging", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool ebl))
+                        EnableBufferedLogging = ebl;
+                    else if (key.Equals("EnableDisabledModsRelocation", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool edmr))
+                        EnableDisabledModsRelocation = edmr;
                     else if (key.Equals("TargetUIScale", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float tuis))
                         TargetUIScale = Math.Clamp(tuis, 0.75f, 2.0f);
                     else if (key.Equals("TargetZoomLevel", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float tzl))
@@ -248,6 +263,11 @@ namespace SDViOSTouchControls
                 sb.Append($"  \"EnableDeferredMapLoading\": {(EnableDeferredMapLoading ? "true" : "false")},\n");
                 sb.Append($"  \"EnableInventoryToolbar\": {(EnableInventoryToolbar ? "true" : "false")},\n");
                 sb.Append($"  \"EnableHoldToDispense\": {(EnableHoldToDispense ? "true" : "false")},\n");
+                sb.Append($"  \"EnableLockedFramePacing\": {(EnableLockedFramePacing ? "true" : "false")},\n");
+                sb.Append($"  \"EnableMenuFrameThrottling\": {(EnableMenuFrameThrottling ? "true" : "false")},\n");
+                sb.Append($"  \"EnableWarpTilesheetPrewarm\": {(EnableWarpTilesheetPrewarm ? "true" : "false")},\n");
+                sb.Append($"  \"EnableBufferedLogging\": {(EnableBufferedLogging ? "true" : "false")},\n");
+                sb.Append($"  \"EnableDisabledModsRelocation\": {(EnableDisabledModsRelocation ? "true" : "false")},\n");
                 sb.Append($"  \"TargetUIScale\": {TargetUIScale.ToString("0.00", CultureInfo.InvariantCulture)},\n");
                 sb.Append($"  \"TargetZoomLevel\": {TargetZoomLevel.ToString("0.00", CultureInfo.InvariantCulture)},\n");
                 sb.Append($"  \"MouseControlMode\": \"{MouseControlMode}\",\n");

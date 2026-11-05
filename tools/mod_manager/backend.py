@@ -303,10 +303,12 @@ class IOSModBackend:
                     self.lockdown, self.bundle_id, documents_only=True
                 )
 
-            # Ensure /Documents/Mods exists
+            # Ensure /Documents/Mods and /Documents/DisabledMods exist
             try:
                 if not await self.house_arrest.exists("/Documents/Mods"):
                     await self.house_arrest.makedirs("/Documents/Mods")
+                if not await self.house_arrest.exists("/Documents/DisabledMods"):
+                    await self.house_arrest.makedirs("/Documents/DisabledMods")
             except Exception:
                 pass
 
@@ -447,6 +449,12 @@ class IOSModBackend:
             return []
 
         try:
+            try:
+                if not await self.house_arrest.exists("/Documents/DisabledMods"):
+                    await self.house_arrest.makedirs("/Documents/DisabledMods")
+            except Exception:
+                pass
+
             entries = await self.house_arrest.listdir("/Documents/Mods")
             for entry in entries:
                 if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
@@ -459,9 +467,39 @@ class IOSModBackend:
                 except Exception:
                     continue
 
+                # Auto-migrate any .disabled_* folders out of /Documents/Mods into /Documents/DisabledMods
+                if entry.startswith(".disabled_") or entry.startswith(".disabled-"):
+                    dest_disabled = f"/Documents/DisabledMods/{entry}"
+                    try:
+                        if await self.house_arrest.exists(dest_disabled):
+                            await self.house_arrest.rm(dest_disabled)
+                        await self.house_arrest.rename(mod_path, dest_disabled)
+                        mod_path = dest_disabled
+                    except Exception:
+                        pass
+
                 manifest_path = f"{mod_path}/manifest.json"
                 mod = await self._parse_manifest_afc(entry, manifest_path)
                 mods.append(mod)
+
+            try:
+                disabled_entries = await self.house_arrest.listdir("/Documents/DisabledMods")
+                seen_folders = {m.folder_name for m in mods}
+                for entry in disabled_entries:
+                    if entry in [".", "..", "SMAPI-config.json", ".DS_Store"] or entry in seen_folders:
+                        continue
+                    mod_path = f"/Documents/DisabledMods/{entry}"
+                    try:
+                        if not await self.house_arrest.isdir(mod_path):
+                            continue
+                    except Exception:
+                        continue
+                    manifest_path = f"{mod_path}/manifest.json"
+                    mod = await self._parse_manifest_afc(entry, manifest_path)
+                    mod.is_enabled = False
+                    mods.append(mod)
+            except Exception:
+                pass
 
             return sorted(mods, key=lambda m: m.name.lower())
         except Exception as e:
@@ -642,8 +680,19 @@ class IOSModBackend:
             return False, "AFC not available"
 
         try:
+            try:
+                if not await self.house_arrest.exists("/Documents/DisabledMods"):
+                    await self.house_arrest.makedirs("/Documents/DisabledMods")
+            except Exception:
+                pass
+
             src = f"/Documents/Mods/{mod.folder_name}"
-            dst = f"/Documents/Mods/{new_folder}"
+            if not await self.house_arrest.exists(src):
+                alt_src = f"/Documents/DisabledMods/{mod.folder_name}"
+                if await self.house_arrest.exists(alt_src):
+                    src = alt_src
+
+            dst = f"/Documents/Mods/{new_folder}" if target_enabled else f"/Documents/DisabledMods/{new_folder}"
             if src != dst and await self.house_arrest.exists(dst):
                 dst_ver = ""
                 try:
@@ -655,9 +704,9 @@ class IOSModBackend:
                     pass
 
                 if target_enabled and dst_ver and dst_ver != mod.version:
-                    # Another version is currently enabled at dst; park it safely instead of deleting it!
+                    # Another version is currently enabled at dst; park it safely in DisabledMods instead of deleting it!
                     parked_name = get_disabled_folder_name(clean_name, dst_ver)
-                    parked_path = f"/Documents/Mods/{parked_name}"
+                    parked_path = f"/Documents/DisabledMods/{parked_name}"
                     if await self.house_arrest.exists(parked_path):
                         await self.house_arrest.rm(parked_path)
                     await self.house_arrest.rename(dst, parked_path)
@@ -896,7 +945,11 @@ class IOSModBackend:
 
         try:
             target = f"/Documents/Mods/{mod.folder_name}"
-            await self.house_arrest.rm(target)
+            if await self.house_arrest.exists(target):
+                await self.house_arrest.rm(target)
+            alt_target = f"/Documents/DisabledMods/{mod.folder_name}"
+            if await self.house_arrest.exists(alt_target):
+                await self.house_arrest.rm(alt_target)
             return True, f"Deleted {mod.name}"
         except Exception as e:
             return False, f"AFC delete failed: {e}"
@@ -955,16 +1008,19 @@ class IOSModBackend:
             return False, "AFC not available"
 
         try:
-            entries = await self.house_arrest.listdir("/Documents/Mods")
-            for entry in entries:
-                if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
+            for base_dir in ["/Documents/Mods", "/Documents/DisabledMods"]:
+                if not await self.house_arrest.exists(base_dir):
                     continue
-                p = f"/Documents/Mods/{entry}"
-                try:
-                    await self.house_arrest.rm(p)
-                    deleted_count += 1
-                except Exception as e:
-                    errors.append(f"{entry}: {e}")
+                entries = await self.house_arrest.listdir(base_dir)
+                for entry in entries:
+                    if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
+                        continue
+                    p = f"{base_dir}/{entry}"
+                    try:
+                        await self.house_arrest.rm(p)
+                        deleted_count += 1
+                    except Exception as e:
+                        errors.append(f"{entry}: {e}")
 
             if errors:
                 return False, f"Deleted {deleted_count} mod(s), but {len(errors)} error(s) occurred."

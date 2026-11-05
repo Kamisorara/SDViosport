@@ -11,6 +11,7 @@ namespace SDViOS.Diagnostics
         private static StreamWriter? _fileWriter;
         private static TextWriter? _originalOut;
         private static TextWriter? _originalError;
+        private static long _lastFlushTick = Environment.TickCount64;
         public static string LogFilePath { get; private set; } = string.Empty;
         public static bool LogsRotatedOnStartup { get; private set; }
 
@@ -44,9 +45,10 @@ namespace SDViOS.Diagnostics
                     // Ignore rotation errors so logger initialization always succeeds
                 }
 
-                // Open with shared read access so iOS Files app and diagnostic tools can inspect while running
-                var fileStream = new FileStream(LogFilePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-                _fileWriter = new StreamWriter(fileStream, Encoding.UTF8) { AutoFlush = true };
+                // Open with shared read access and 16 KB buffer (AutoFlush = false to avoid synchronous flash stalls on trace bursts;
+                // warnings, errors, fatal crashes, and app backgrounding flush synchronously)
+                var fileStream = new FileStream(LogFilePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, bufferSize: 16384);
+                _fileWriter = new StreamWriter(fileStream, Encoding.UTF8, bufferSize: 16384) { AutoFlush = false };
 
                 _originalOut = Console.Out;
                 _originalError = Console.Error;
@@ -82,17 +84,32 @@ namespace SDViOS.Diagnostics
         {
             lock (_lock)
             {
-                try { _fileWriter?.Flush(); } catch { }
+                try
+                {
+                    _fileWriter?.Flush();
+                    _lastFlushTick = Environment.TickCount64;
+                }
+                catch { }
             }
         }
 
         public static void Log(string message, string tag = "INFO")
         {
             string line = $"[{DateTime.Now:HH:mm:ss.fff}] [{tag}] {message}";
+            bool forceFlush = tag == "WARN" || tag == "ERROR" || tag == "CRASH" || tag == "CRITICAL";
             lock (_lock)
             {
                 _originalOut?.WriteLine(line);
-                _fileWriter?.WriteLine(line);
+                if (_fileWriter != null)
+                {
+                    _fileWriter.WriteLine(line);
+                    long now = Environment.TickCount64;
+                    if (forceFlush || (now - _lastFlushTick) >= 1500)
+                    {
+                        try { _fileWriter.Flush(); } catch { }
+                        _lastFlushTick = now;
+                    }
+                }
             }
         }
 
@@ -129,10 +146,21 @@ namespace SDViOS.Diagnostics
             {
                 string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
                 string line = $"[{timestamp}] {_prefix}{value}";
+                bool isUrgent = _prefix == "[STDERR] " ||
+                                (value != null && (value.Contains("WARN", StringComparison.Ordinal) ||
+                                                   value.Contains("ERROR", StringComparison.Ordinal) ||
+                                                   value.Contains("CRITICAL", StringComparison.Ordinal) ||
+                                                   value.Contains("Exception", StringComparison.Ordinal)));
                 lock (_lock)
                 {
                     _console.WriteLine(line);
                     _file.WriteLine(line);
+                    long now = Environment.TickCount64;
+                    if (isUrgent || (now - _lastFlushTick) >= 1500)
+                    {
+                        try { _file.Flush(); } catch { }
+                        _lastFlushTick = now;
+                    }
                 }
             }
 

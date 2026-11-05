@@ -129,6 +129,11 @@ namespace SDViOSTouchControls
             try { MemoryWatchdog.Start(Monitor); }
             catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
 
+            // 9. Core Optimizations: Relocate .disabled_* mods, buffer EngineLogger I/O, and initialize CADisplayLink frame pacing
+            RelocateDisabledModsOnBoot();
+            ConfigureBufferedEngineLogger();
+            UpdateDisplayLinkFrameRate(force: true);
+
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
 
@@ -1094,6 +1099,9 @@ namespace SDViOSTouchControls
                 // Prune previous locations' tilesheet references from the display device
                 LazyIosDisplayDevice.Instance?.PruneTileSheets(location.map);
 
+                // Pre-warm destination tilesheets while screen is black (guarded by 300 MB / 250 MB memory check)
+                LazyIosDisplayDevice.Instance?.PrewarmMapTileSheets(location.map);
+
                 long availMb = MemoryWatchdog.Available() / (1024 * 1024);
                 if (availMb < 120)
                 {
@@ -1563,7 +1571,7 @@ namespace SDViOSTouchControls
             catch { }
         }
 
-        private static bool IsCoreAsset(string key)
+        internal static bool IsCoreAsset(string key)
         {
             if (string.IsNullOrEmpty(key)) return true;
             key = key.Replace('\\', '/');
@@ -2042,6 +2050,7 @@ namespace SDViOSTouchControls
 
                 // Ensure native resolution remains locked
                 EnsureNativeResolution(false);
+                UpdateDisplayLinkFrameRate(force: false);
 
                 if (!_legacyNeutralized && Game1.game1 != null)
                 {
@@ -2099,6 +2108,255 @@ namespace SDViOSTouchControls
 
             // Process any pending midday QuickSave state sync
             QuickSaveManager.Instance?.Update();
+
+            if (e.IsMultipleOf(90))
+            {
+                FlushEngineLogger();
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeCAFrameRateRange
+        {
+            public float Minimum;
+            public float Maximum;
+            public float Preferred;
+        }
+
+        [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "sel_registerName")]
+        private static extern IntPtr sel_registerName(string name);
+
+        [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool objc_msgSend_bool_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1);
+
+        [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern void objc_msgSend_CAFrameRateRange(IntPtr receiver, IntPtr selector, NativeCAFrameRateRange range);
+
+        [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")]
+        private static extern void objc_msgSend_nint(IntPtr receiver, IntPtr selector, nint arg1);
+
+        private static FieldInfo? _hostDisplayLinkField;
+        private static PropertyInfo? _nsObjectHandleProp;
+        private static FieldInfo? _nativeHandleField;
+        private static IntPtr _selSetPreferredFrameRateRange;
+        private static IntPtr _selSetPreferredFramesPerSecond;
+        private static IntPtr _selRespondsToSelector;
+        private static int _currentAppliedDisplayFps = 0;
+        private static object? _engineLoggerLockObj;
+        private static System.IO.StreamWriter? _engineLoggerWriter;
+
+        private void RelocateDisabledModsOnBoot()
+        {
+            try
+            {
+                if (!TouchOverlaySettings.Instance.EnableDisabledModsRelocation)
+                    return;
+
+                string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string modsDir = System.IO.Path.Combine(docs, "Mods");
+                if (!System.IO.Directory.Exists(modsDir))
+                    return;
+
+                string disabledRoot = System.IO.Path.Combine(docs, "DisabledMods");
+                int moved = 0;
+                foreach (string dir in System.IO.Directory.GetDirectories(modsDir))
+                {
+                    string folderName = System.IO.Path.GetFileName(dir);
+                    if (folderName.StartsWith(".disabled_", StringComparison.OrdinalIgnoreCase) ||
+                        folderName.StartsWith(".disabled-", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            System.IO.Directory.CreateDirectory(disabledRoot);
+                            string dest = System.IO.Path.Combine(disabledRoot, folderName);
+                            if (System.IO.Directory.Exists(dest))
+                            {
+                                System.IO.Directory.Delete(dest, recursive: true);
+                            }
+                            System.IO.Directory.Move(dir, dest);
+                            moved++;
+                        }
+                        catch { }
+                    }
+                }
+                if (moved > 0)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Relocated {moved} disabled mod folder(s) from /Documents/Mods/ to /Documents/DisabledMods/.", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note relocating disabled mods: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        private void ConfigureBufferedEngineLogger()
+        {
+            try
+            {
+                if (!TouchOverlaySettings.Instance.EnableBufferedLogging)
+                    return;
+
+                var sdvIosAsm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "SDViOS");
+                if (sdvIosAsm == null) return;
+
+                var loggerType = sdvIosAsm.GetType("SDViOS.Diagnostics.EngineLogger");
+                if (loggerType != null)
+                {
+                    _engineLoggerLockObj = loggerType.GetField("_lock", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(null);
+                    _engineLoggerWriter = loggerType.GetField("_fileWriter", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(null) as System.IO.StreamWriter;
+                    if (_engineLoggerWriter != null)
+                    {
+                        _engineLoggerWriter.AutoFlush = false;
+                        Monitor.Log("[SDViOSTouchControls] Enabled buffered EngineLogger (AutoFlush = false, synchronous flush on warn/error/backgrounding).", LogLevel.Info);
+                    }
+
+                    var harmony = new Harmony("com.deadakj.sdviostouchcontrols.logger");
+                    var flushPostfix = new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixFlushEngineLogger), BindingFlags.Static | BindingFlags.NonPublic));
+
+                    foreach (string methodName in new[] { "LogWarning", "LogError", "LogFatal" })
+                    {
+                        var m = loggerType.GetMethod(methodName, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (m != null)
+                        {
+                            try { harmony.Patch(m, postfix: flushPostfix); } catch { }
+                        }
+                    }
+
+                    var appDelegateType = sdvIosAsm.GetType("SDViOS.AppDelegate");
+                    if (appDelegateType != null)
+                    {
+                        foreach (string methodName in new[] { "DidEnterBackground", "WillTerminate", "ReceiveMemoryWarning" })
+                        {
+                            var m = appDelegateType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (m != null)
+                            {
+                                try { harmony.Patch(m, postfix: flushPostfix); } catch { }
+                            }
+                        }
+                    }
+
+                    var gameHostType = sdvIosAsm.GetType("SDViOS.Loader.GameHost");
+                    var mDidBg = gameHostType?.GetMethod("OnDidEnterBackground", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mDidBg != null)
+                    {
+                        try { harmony.Patch(mDidBg, postfix: flushPostfix); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note configuring buffered EngineLogger: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        private static void PostfixFlushEngineLogger()
+        {
+            FlushEngineLogger();
+        }
+
+        public static void FlushEngineLogger()
+        {
+            try
+            {
+                if (_engineLoggerWriter == null) return;
+                if (_engineLoggerLockObj != null)
+                {
+                    lock (_engineLoggerLockObj)
+                    {
+                        _engineLoggerWriter.Flush();
+                    }
+                }
+                else
+                {
+                    _engineLoggerWriter.Flush();
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateDisplayLinkFrameRate(bool force)
+        {
+            try
+            {
+                if (!TouchOverlaySettings.Instance.EnableLockedFramePacing)
+                    return;
+
+                // 1. Lock IsFixedTimeStep = true alongside CAFrameRateRange (Auditor Revision #1)
+                if (Game1.game1 != null && !Game1.game1.IsFixedTimeStep)
+                {
+                    Game1.game1.IsFixedTimeStep = true;
+                    Game1.game1.TargetElapsedTime = TimeSpan.FromTicks(166667);
+                }
+                if (GameRunner.instance != null && !GameRunner.instance.IsFixedTimeStep)
+                {
+                    GameRunner.instance.IsFixedTimeStep = true;
+                    GameRunner.instance.TargetElapsedTime = TimeSpan.FromTicks(166667);
+                }
+
+                // 2. Determine target frame rate: 30Hz in static menus (Auditor Revision #6), 60Hz in gameplay/minigames
+                bool inStaticMenu = TouchOverlaySettings.Instance.EnableMenuFrameThrottling &&
+                                    Game1.gameMode == 3 &&
+                                    Game1.activeClickableMenu != null &&
+                                    !(Game1.activeClickableMenu is BobberBar) &&
+                                    Game1.currentMinigame == null;
+
+                int targetFps = inStaticMenu ? 30 : 60;
+                if (!force && _currentAppliedDisplayFps == targetFps)
+                    return;
+
+                if (_hostDisplayLinkField == null)
+                {
+                    var sdvIosAsm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "SDViOS");
+                    var ghType = sdvIosAsm?.GetType("SDViOS.Loader.GameHost");
+                    _hostDisplayLinkField = ghType?.GetField("_engineDisplayLink", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+
+                var dlObj = _hostDisplayLinkField?.GetValue(null);
+                if (dlObj == null) return;
+
+                _nsObjectHandleProp ??= dlObj.GetType().GetProperty("Handle", BindingFlags.Instance | BindingFlags.Public);
+                var nativeHandleVal = _nsObjectHandleProp?.GetValue(dlObj);
+                if (nativeHandleVal == null) return;
+
+                IntPtr dlHandle = IntPtr.Zero;
+                if (nativeHandleVal is IntPtr directPtr)
+                {
+                    dlHandle = directPtr;
+                }
+                else
+                {
+                    _nativeHandleField ??= nativeHandleVal.GetType().GetField("handle", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (_nativeHandleField?.GetValue(nativeHandleVal) is IntPtr extractedPtr)
+                        dlHandle = extractedPtr;
+                }
+
+                if (dlHandle == IntPtr.Zero) return;
+
+                if (_selSetPreferredFrameRateRange == IntPtr.Zero)
+                    _selSetPreferredFrameRateRange = sel_registerName("setPreferredFrameRateRange:");
+                if (_selSetPreferredFramesPerSecond == IntPtr.Zero)
+                    _selSetPreferredFramesPerSecond = sel_registerName("setPreferredFramesPerSecond:");
+                if (_selRespondsToSelector == IntPtr.Zero)
+                    _selRespondsToSelector = sel_registerName("respondsToSelector:");
+
+                if (objc_msgSend_bool_IntPtr(dlHandle, _selRespondsToSelector, _selSetPreferredFramesPerSecond))
+                {
+                    objc_msgSend_nint(dlHandle, _selSetPreferredFramesPerSecond, (nint)targetFps);
+                }
+
+                if (objc_msgSend_bool_IntPtr(dlHandle, _selRespondsToSelector, _selSetPreferredFrameRateRange))
+                {
+                    var range = inStaticMenu
+                        ? new NativeCAFrameRateRange { Minimum = 30f, Maximum = 60f, Preferred = 30f }
+                        : new NativeCAFrameRateRange { Minimum = 60f, Maximum = 60f, Preferred = 60f };
+                    objc_msgSend_CAFrameRateRange(dlHandle, _selSetPreferredFrameRateRange, range);
+                }
+
+                _currentAppliedDisplayFps = targetFps;
+            }
+            catch { }
         }
 
         private static bool _wasInBobberBar = false;

@@ -36,6 +36,10 @@ namespace SDViOS
                     })
                 );
 
+                NSNotificationCenter.DefaultCenter.AddObserver(UIApplication.WillResignActiveNotification, _ => EngineLogger.Flush());
+                NSNotificationCenter.DefaultCenter.AddObserver(UIApplication.DidEnterBackgroundNotification, _ => GameHost.OnDidEnterBackground());
+                NSNotificationCenter.DefaultCenter.AddObserver(UIApplication.WillTerminateNotification, _ => GameHost.OnDidEnterBackground());
+
                 GameHost.InitializeFileSystem();
                 EngineLogger.Log("[AppDelegate] FinishedLaunching: Checking game files...");
 
