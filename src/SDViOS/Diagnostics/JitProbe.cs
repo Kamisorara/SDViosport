@@ -19,7 +19,13 @@ namespace SDViOS.Diagnostics
     ///    are not resolvable, no runtime mode-flip is possible without rebuilding the
     ///    runtime, regardless of what the OS allows.
     ///
-    /// Strictly read-only: never calls into Mono, unmaps everything it maps.
+    /// 3. Execution probe (route-A foundation test) — writes a real ARM64 function
+    ///    (mov w0, #42; ret) into a W+X mapping, flushes the instruction cache, and calls
+    ///    it. mmap succeeding is NOT proof that dynamic code may execute; this is. If the
+    ///    kernel forbids it the process dies here — which is itself the answer, so every
+    ///    other probe result is logged BEFORE this step runs.
+    ///
+    /// Strictly read-only towards Mono: never calls into Mono, unmaps everything it maps.
     /// </summary>
     public static class JitProbe
     {
@@ -43,6 +49,14 @@ namespace SDViOS.Diagnostics
         [DllImport("libc", SetLastError = true)]
         private static extern int munmap(IntPtr addr, IntPtr length);
 
+        // Apple's real signature is (start, end) — NOT (start, len). GameHost.cs:55 declares
+        // it as (start, len), which silently no-ops; do not copy that here.
+        [DllImport("libSystem.dylib", EntryPoint = "sys_icache_invalidate")]
+        private static extern void sys_icache_invalidate(IntPtr start, IntPtr end);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int ExecFn();
+
         public static void Run()
         {
             try
@@ -50,6 +64,7 @@ namespace SDViOS.Diagnostics
                 ProbeRwxDirect();
                 ProbeRwThenMprotect();
                 ProbeMonoSymbols();
+                ProbeExecDynamicCode();
             }
             catch (Exception ex)
             {
@@ -122,6 +137,50 @@ namespace SDViOS.Diagnostics
                 EngineLogger.Log(NativeLibrary.TryGetExport(handle, name, out IntPtr addr)
                     ? $"[JitProbe] symbol {name}: EXPORTED at 0x{addr.ToString("x")}"
                     : $"[JitProbe] symbol {name}: not exported", "JITPROBE");
+            }
+        }
+
+        /// <summary>
+        /// Route-A foundation test: prove or refute that dynamically generated code actually
+        /// executes on this device. Runs LAST — if the kernel kills the process mid-call,
+        /// every earlier probe line is already on disk, and the missing final line is the
+        /// verdict (absence of "[JitProbe] exec test: returned ..." = execution forbidden).
+        /// </summary>
+        private static void ProbeExecDynamicCode()
+        {
+            IntPtr p = mmap(IntPtr.Zero, (IntPtr)PageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (p == MapFailed)
+            {
+                EngineLogger.Log($"[JitProbe] exec test: skipped — mmap RWX denied (errno={Marshal.GetLastWin32Error()}).", "JITPROBE");
+                return;
+            }
+            try
+            {
+                // ARM64: mov w0, #42 ; ret  — returns a recognizable constant, nothing else.
+                byte[] code = { 0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6 };
+                Marshal.Copy(code, 0, p, code.Length);
+
+                byte[] readBack = new byte[code.Length];
+                Marshal.Copy(p, readBack, 0, code.Length);
+                bool dataPathOk = readBack[0] == code[0] && readBack[4] == code[4];
+
+                sys_icache_invalidate(p, p + code.Length);
+
+                EngineLogger.Log($"[JitProbe] exec test: RWX page mapped, code written={dataPathOk}, icache flushed. About to CALL dynamic code — if the next [JitProbe] line never appears, the kernel killed the process here (execution forbidden).", "JITPROBE");
+                EngineLogger.Flush();
+
+                var fn = Marshal.GetDelegateForFunctionPointer<ExecFn>(p);
+                int result = fn();
+                EngineLogger.Log($"[JitProbe] exec test: returned {result} (expected 42) — dynamic code EXECUTES. Route A foundation CONFIRMED.", "JITPROBE");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[JitProbe] exec test: marshaling/call failed before execution: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                munmap(p, (IntPtr)PageSize);
             }
         }
     }
