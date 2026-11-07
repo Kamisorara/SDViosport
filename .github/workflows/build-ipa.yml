@@ -20,7 +20,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-14 images retired 2026-11-02 (actions/runner-images#13518) — GitHub now hard-rejects the job config.
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
