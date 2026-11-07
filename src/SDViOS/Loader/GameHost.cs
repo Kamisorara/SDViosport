@@ -274,6 +274,11 @@ namespace SDViOS.Loader
             Directory.CreateDirectory(LogsDir);
 
             EngineLogger.Initialize(LogsDir);
+
+            // JIT/W^X probe (StikDebug experiment): must run before any game/mod assembly
+            // executes so the result lands in the log even when the session later dies.
+            JitProbe.Run();
+
             EngineLogger.Log($"[Engine] Initialized file system.");
             EngineLogger.Log($"BundleDir: {BundleDir}");
             EngineLogger.Log($"DocumentsDir: {DocumentsDir}");

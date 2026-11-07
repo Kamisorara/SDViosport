@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_interpreter:
+        description: 'Override Mono UseInterpreter (empty=default, false=AOT-only crash-test IPA)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -40,19 +45,32 @@ jobs:
           dotnet restore src/SDViOS/SDViOS.csproj -p:CheckEolWorkloads=false -p:CheckEolTargetFramework=false
 
       - name: Build and Publish iOS App
+        env:
+          # workflow_dispatch only: 'false' builds an AOT-only variant (no interpreter).
+          # Expected on device: ExecutionEngineException "Attempting to JIT compile method
+          # ... while running in aot-only mode" at the first runtime-loaded game method —
+          # that crash point is exactly what the StikDebug experiment needs to see.
+          USE_INTERPRETER: ${{ inputs.use_interpreter }}
         run: |
-          dotnet publish src/SDViOS/SDViOS.csproj \
-            -f net8.0-ios17.0 \
-            -c Release \
-            -p:Platform=iPhone \
-            -p:RuntimeIdentifier=ios-arm64 \
-            -p:ArchiveOnBuild=false \
-            -p:EnableCodeSigning=false \
-            -p:CodesignKey="" \
-            -p:CodesignProvision="" \
-            -p:CheckEolWorkloads=false \
-            -p:CheckEolTargetFramework=false \
-            -o ./publish
+          PUBLISH_ARGS=(
+            -f net8.0-ios17.0
+            -c Release
+            -p:Platform=iPhone
+            -p:RuntimeIdentifier=ios-arm64
+            -p:ArchiveOnBuild=false
+            -p:EnableCodeSigning=false
+            -p:CodesignKey=""
+            -p:CodesignProvision=""
+            -p:CheckEolWorkloads=false
+            -p:CheckEolTargetFramework=false
+          )
+          if [ -n "$USE_INTERPRETER" ]; then
+            case "$USE_INTERPRETER" in
+              true|false) PUBLISH_ARGS+=("-p:UseInterpreter=$USE_INTERPRETER") ;;
+              *) echo "::error::use_interpreter must be 'true' or 'false'"; exit 1 ;;
+            esac
+          fi
+          dotnet publish src/SDViOS/SDViOS.csproj "${PUBLISH_ARGS[@]}" -o ./publish
 
       - name: Package IPA
         run: |
@@ -78,7 +96,7 @@ jobs:
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StardewValley-iOS
+          name: StardewValley-iOS${{ inputs.use_interpreter == 'true' && '-interpreter' || inputs.use_interpreter == 'false' && '-aot-only' || '' }}
           path: StardewValley-iOS.ipa
           retention-days: 14
 
