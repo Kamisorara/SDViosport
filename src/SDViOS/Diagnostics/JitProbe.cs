@@ -195,7 +195,7 @@ namespace SDViOS.Diagnostics
                     (delegate* unmanaged[Cdecl]<IntPtr, void>)&Jit26LogFromNative);
                 LogAndFlush(
                     $"jit26 finished: rc={rc} status={res.Status} rx=0x{res.Rx.ToInt64():x} rw=0x{res.Rw.ToInt64():x} " +
-                    $"cap=0x{res.Capacity.ToInt64():x} probe1={res.Probe1} probe2={res.Probe2}");
+                    $"cap=0x{(long)res.Capacity:x} probe1={res.Probe1} probe2={res.Probe2}");
                 bool go = rc == 0 && res.Status == 0 && res.Probe1 == 42 && res.Probe2 == 43;
                 LogAndFlush(go
                     ? "VERDICT: dynamic code EXECUTES from a blessed arena — route A foundation CONFIRMED. Next milestone: build a JIT-enabled runtime and feed it this arena (docs/JIT-ROUTE.md, phase 2)."
