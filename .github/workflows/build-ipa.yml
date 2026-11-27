@@ -28,6 +28,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Build jit26 native stub (route-A arena probe)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -O2 -c src/SDViOS/native/jit26.c -o src/SDViOS/native/jit26.o
+          ar rcs src/SDViOS/native/libjit26.a src/SDViOS/native/jit26.o
+          lipo -info src/SDViOS/native/libjit26.a
+
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:

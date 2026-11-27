@@ -1,32 +1,35 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace SDViOS.Diagnostics
 {
     /// <summary>
-    /// JIT-availability probe (experiment branch, StikDebug / route-A investigation).
+    /// JIT-availability probe, v4 (experiment branch, route-A investigation).
     ///
-    /// CRITICAL LOGGING NOTE: upstream EngineLogger (7fbd9b6) buffers writes (AutoFlush=false,
-    /// 16 KB buffer). A kernel SIGKILL loses the entire buffer, so EVERY line this class logs
-    /// is followed by an explicit Flush() — probe v2 produced empty logs precisely because
-    /// the process was killed while everything was still buffered.
+    /// v4 replaces probe v3's self-RWX execution test with the jit26 arena
+    /// handshake proven in rimworld-ios-port (Port17) / playport: a StikDebug
+    /// session allocates and page-blesses a 128 MiB RX arena via a brk
+    /// #0xf00d handshake, the app aliases it RW, detaches, and only then
+    /// executes self-written machine code FROM THE ARENA. iOS 26+ refuses to
+    /// execute self-created RWX mappings (probe v3's SIGKILL), so executable
+    /// memory must come from the debug session; the brk stubs live in the
+    /// app's __TEXT segment (src/SDViOS/native/jit26.c, built by CI).
     ///
     /// Probes, in order:
-    /// 1. W^X mapping probes (immediate, at startup) — mmap RWX direct, and mmap-RW +
-    ///    mprotect-to-RWX. Both succeeded on device even without any JIT enabler, which
-    ///    proves mapping is NOT the enforcement point.
-    /// 2. Mono symbol probe (immediate) — mono_jit_set_aot_mode etc. are not exported from
-    ///    the statically linked runtime (verified on device and by Mach-O scan: the JIT
-    ///    compiler frontend is not even compiled into the shipped binary).
-    /// 3. Execution probe (DELAYED 90 s) — writes a real ARM64 function (mov w0, #42; ret)
-    ///    into a W+X mapping, flushes the instruction cache, and calls it, with each step
-    ///    logged and flushed separately so the exact killing step is identifiable.
-    ///    Delayed because AltJIT/StikDebug can only grant JIT to an ALREADY RUNNING process
-    ///    (debugger attach after launch): a startup-time probe can never observe the
-    ///    JIT-enabled state — probe v2 died at ~launch before any enabler could attach.
+    /// 1. W^X mapping probes (evidence: mapping is NOT the enforcement point).
+    /// 2. Mono symbol probe (mono_jit_* are absent from the shipped runtime —
+    ///    proof that the bundled Mono cannot JIT and a new runtime build is
+    ///    required; see docs/JIT-ROUTE.md).
+    /// 3. jit26 arena probe on a background thread (never blocks game startup):
+    ///    gates on a live debugger (120 s), waits for the script, verifies the
+    ///    arena with the 42/43 execution test. VERDICT line at the end.
     ///
-    /// Strictly read-only towards Mono: never calls into Mono, unmaps everything it maps.
+    /// CRITICAL LOGGING NOTE: EngineLogger buffers (AutoFlush=false, 16 KB);
+    /// a SIGKILL loses the buffer, so every line is flushed immediately.
+    /// Strictly read-only towards Mono: never calls into Mono, unmaps its own
+    /// mappings.
     /// </summary>
     public static class JitProbe
     {
@@ -38,10 +41,9 @@ namespace SDViOS.Diagnostics
         private const int MAP_PRIVATE = 0x02;
         private const int MAP_ANON = 0x1000;
         private const int PageSize = 16384; // iOS arm64 devices use 16 KB pages
-        private const int ExecProbeDelayMs = 90_000;
+        private const int AcquireWaitSeconds = 120;
 
         private static readonly IntPtr MapFailed = new IntPtr(-1);
-        private static Timer? _execTimer; // rooted so the delayed probe cannot be GC'd
 
         [DllImport("libc", SetLastError = true)]
         private static extern IntPtr mmap(IntPtr addr, IntPtr length, int prot, int flags, int fd, long offset);
@@ -52,13 +54,40 @@ namespace SDViOS.Diagnostics
         [DllImport("libc", SetLastError = true)]
         private static extern int munmap(IntPtr addr, IntPtr length);
 
-        // Apple's real signature is (start, end) — NOT (start, len). GameHost.cs:55 declares
-        // it as (start, len), which silently no-ops; do not copy that here.
-        [DllImport("libSystem.dylib", EntryPoint = "sys_icache_invalidate")]
-        private static extern void sys_icache_invalidate(IntPtr start, IntPtr end);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Jit26Result
+        {
+            public int Status;      // 0 ok; 10 no debugger; 11 prepare NULL; 12 alias failed; 13 probe failed
+            public IntPtr Rx;
+            public IntPtr Rw;
+            public UIntPtr Capacity;
+            public int Probe1;
+            public int Probe2;
+        }
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int ExecFn();
+        [DllImport("__Internal", CallingConvention = CallingConvention.Cdecl)]
+        private static extern unsafe int sdv_jit26_acquire(
+            out Jit26Result result,
+            int waitSeconds,
+            delegate* unmanaged[Cdecl]<IntPtr, void> logLine);
+
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static void Jit26LogFromNative(IntPtr linePtr)
+        {
+            try
+            {
+                string? line = Marshal.PtrToStringUTF8(linePtr);
+                if (!string.IsNullOrEmpty(line))
+                {
+                    EngineLogger.Log(line, "JIT26");
+                    EngineLogger.Flush();
+                }
+            }
+            catch
+            {
+                // never let a managed exception cross the native boundary
+            }
+        }
 
         public static void Run()
         {
@@ -67,7 +96,6 @@ namespace SDViOS.Diagnostics
                 ProbeRwxDirect();
                 ProbeRwThenMprotect();
                 ProbeMonoSymbols();
-                ScheduleDelayedExecProbe();
             }
             catch (Exception ex)
             {
@@ -79,6 +107,10 @@ namespace SDViOS.Diagnostics
                 // hostage against a later kill.
                 EngineLogger.Flush();
             }
+
+            LogAndFlush($"[3] jit26 arena handshake starting on a background thread (waits up to {AcquireWaitSeconds} s for a live debugger — launch via StikDebug and run probe/stikdebug/sdv-jit26.js).");
+            var t = new Thread(AcquireArena) { IsBackground = true, Name = "jit26-acquire" };
+            t.Start();
         }
 
         private static void LogAndFlush(string message, string tag = "JITPROBE")
@@ -131,8 +163,10 @@ namespace SDViOS.Diagnostics
         }
 
         /// <summary>
-        /// Presence of these exports decides whether a runtime aot-mode flip is even
-        /// conceivable. Addresses are logged but never called.
+        /// Presence of these exports decides whether the SHIPPED runtime could
+        /// ever flip into JIT mode (v3 verdict: none are exported — a new
+        /// runtime build is required; docs/JIT-ROUTE.md). Addresses are logged
+        /// but never called.
         /// </summary>
         private static void ProbeMonoSymbols()
         {
@@ -152,67 +186,24 @@ namespace SDViOS.Diagnostics
             }
         }
 
-        /// <summary>Schedules the execution probe 90 s after startup (see class doc).</summary>
-        private static void ScheduleDelayedExecProbe()
+        private static unsafe void AcquireArena()
         {
-            LogAndFlush($"exec probe scheduled in {ExecProbeDelayMs / 1000} s (time to enable JIT via StikDebug on the RUNNING app).");
-            _execTimer = new Timer(_ =>
-            {
-                try
-                {
-                    ProbeExecDynamicCode();
-                }
-                catch (Exception ex)
-                {
-                    LogAndFlush($"exec probe failed unexpectedly: {ex.GetType().Name}: {ex.Message}", "JITPROBE");
-                }
-            }, null, ExecProbeDelayMs, Timeout.Infinite);
-        }
-
-        /// <summary>
-        /// Route-A foundation test: prove or refute that dynamically generated code actually
-        /// EXECUTES on this device. Every step is logged AND flushed, so wherever the process
-        /// dies, the log names the exact forbidden step:
-        ///   dies after [2/4]  -> the icache flush (making written pages executable) is denied;
-        ///   dies after [3/4]  -> the execution itself is denied;
-        ///   [4/4] appears     -> dynamic code runs, route A (custom JIT runtime) is GO.
-        /// </summary>
-        private static void ProbeExecDynamicCode()
-        {
-            LogAndFlush("exec test [1/4]: mapping fresh RWX page...");
-            IntPtr p = mmap(IntPtr.Zero, (IntPtr)PageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-                MAP_PRIVATE | MAP_ANON, -1, 0);
-            if (p == MapFailed)
-            {
-                LogAndFlush($"exec test: skipped — mmap RWX denied at T+90s (errno={Marshal.GetLastWin32Error()}).");
-                return;
-            }
             try
             {
-                // ARM64: mov w0, #42 ; ret  — returns a recognizable constant, nothing else.
-                byte[] code = { 0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6 };
-                Marshal.Copy(code, 0, p, code.Length);
-
-                byte[] readBack = new byte[code.Length];
-                Marshal.Copy(p, readBack, 0, code.Length);
-                bool dataPathOk = readBack[0] == code[0] && readBack[4] == code[4];
-
-                LogAndFlush($"exec test [2/4]: code written={dataPathOk}; about to sys_icache_invalidate — if the process dies after this line, the i-cache flush (making written pages executable) is the forbidden step.");
-                sys_icache_invalidate(p, p + code.Length);
-
-                LogAndFlush("exec test [3/4]: icache flush SURVIVED; about to CALL the generated function — if the process dies after this line, executing dynamic code is the forbidden step.");
-                var fn = Marshal.GetDelegateForFunctionPointer<ExecFn>(p);
-                int result = fn();
-
-                LogAndFlush($"exec test [4/4]: returned {result} (expected 42) — dynamic code EXECUTES. Route A foundation CONFIRMED.");
+                var res = new Jit26Result();
+                int rc = sdv_jit26_acquire(out res, AcquireWaitSeconds,
+                    (delegate* unmanaged[Cdecl]<IntPtr, void>)&Jit26LogFromNative);
+                LogAndFlush(
+                    $"jit26 finished: rc={rc} status={res.Status} rx=0x{res.Rx.ToInt64():x} rw=0x{res.Rw.ToInt64():x} " +
+                    $"cap=0x{res.Capacity.ToInt64():x} probe1={res.Probe1} probe2={res.Probe2}");
+                bool go = rc == 0 && res.Status == 0 && res.Probe1 == 42 && res.Probe2 == 43;
+                LogAndFlush(go
+                    ? "VERDICT: dynamic code EXECUTES from a blessed arena — route A foundation CONFIRMED. Next milestone: build a JIT-enabled runtime and feed it this arena (docs/JIT-ROUTE.md, phase 2)."
+                    : "VERDICT: arena grant FAILED in this session (not launched via StikDebug, or the kernel refused). The interpreter path remains the product; retry with a StikDebug launch.");
             }
             catch (Exception ex)
             {
-                LogAndFlush($"exec test: marshaling/call failed before execution: {ex.GetType().Name}: {ex.Message}", "JITPROBE");
-            }
-            finally
-            {
-                munmap(p, (IntPtr)PageSize);
+                LogAndFlush($"jit26 acquire failed unexpectedly: {ex.GetType().Name}: {ex.Message}");
             }
         }
     }

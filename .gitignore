@@ -22,6 +22,8 @@ tools/token.txt
 # Python
 __pycache__/
 *.pyc
+src/SDViOS/native/*.o
+src/SDViOS/native/*.a
 tools/mod_manager/config.json
 tools/mod_manager/profiles.json
 tools/mod_manager/downloads/

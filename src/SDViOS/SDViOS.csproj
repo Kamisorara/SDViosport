@@ -29,6 +29,8 @@
     <!-- Enable task debugging / JIT execution where available -->
     <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <!-- jit26 route-A probe: unsafe function pointers for the native arena handshake -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,5 +55,12 @@
 
   <ItemGroup>
     <BundleResource Include="Resources/AppIcons/*.png" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- jit26 route-A probe: brk handshake stubs in __TEXT (built by CI from native/jit26.c,
+       see .github/workflows/build-ipa.yml 'Build jit26 native stub'). Missing locally is fine
+       on Windows; the host only builds on macOS anyway. -->
+  <ItemGroup>
+    <NativeReference Include="native\libjit26.a" Kind="Static" ForceLoad="true" />
   </ItemGroup>
 </Project>
