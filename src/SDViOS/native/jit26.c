@@ -35,6 +35,7 @@
 #error "jit26.c is arm64-only (iOS devices)"
 #endif
 
+#include <errno.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -97,10 +98,11 @@ static int debugger_attached(void)
 // the script's x0==NULL check would fail (Port17's real-device lesson).
 __attribute__((noinline, optnone, naked)) static void *jit26_prepare_region(void *addr, size_t len)
 {
+    // naked: only the asm block is allowed here (a plain statement fails to compile);
+    // addr/len arrive in x0/x1 untouched and are consumed by the debugger-side script.
     __asm__ volatile("mov x16, #1\n"
                      "brk #0xf00d\n"
                      "ret\n");
-    (void)addr; (void)len;
 }
 
 __attribute__((noinline, optnone, naked)) static void jit26_detach(void)
